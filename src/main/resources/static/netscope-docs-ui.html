@@ -80,12 +80,27 @@
             font-weight: 700;
             font-size: 1.1rem;
             color: var(--bg-primary);
+            flex-shrink: 0;
+        }
+
+        .logo-text-wrapper {
+            display: flex;
+            flex-direction: column;
+            gap: 0.125rem;
         }
 
         .logo-text {
             font-size: 1.25rem;
             font-weight: 700;
             color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .logo-subtitle {
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: var(--text-tertiary);
+            line-height: 1;
         }
 
         .header-nav {
@@ -570,13 +585,15 @@
     <div class="container">
         <div class="header-content">
             <div class="logo">
-                <div class="logo-icon">N</div>
-                <span class="logo-text">NetScope</span>
+                <!-- <div class="logo-icon"></div> -->
+                <div class="logo-text-wrapper">
+                    <span class="logo-text">NetScope</span>
+                    <span class="logo-subtitle">By FractalX</span>
+                </div>
             </div>
             <nav class="header-nav">
-                <a href="#" class="nav-link">Docs</a>
-                <a href="#" class="nav-link">Reference</a>
-                <a href="#" class="nav-link">Support</a>
+                <a href="https://sathnindu-kottage.gitbook.io/netscope/" class="nav-link">Docs</a>
+                <a href="mailto:fractalx.dev@gmail.com" class="nav-link">Support</a>
             </nav>
         </div>
     </div>
@@ -668,8 +685,8 @@
 
             const httpMethodClass = `http-${m.httpMethod.toLowerCase()}`;
             const restrictedBadge = m.restricted
-                ? '<span class="method-badge badge-restricted">🔒 Restricted</span>'
-                : '<span class="method-badge badge-public">🌐 Public</span>';
+                ? '<span class="method-badge badge-restricted">Restricted</span>'
+                : '<span class="method-badge badge-public">Public</span>';
 
             div.innerHTML = `
                 <div class="method-header">

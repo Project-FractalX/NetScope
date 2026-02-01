@@ -35,7 +35,7 @@ NetScope is ideal for **internal microservice communication**, **RPC**, or **dyn
 <dependency>
     <groupId>com.netscope</groupId>
     <artifactId>netscope-core</artifactId>
-    <version>1.1.0-SNAPSHOT</version>
+    <version>1.0.0-SNAPSHOT</version>
 </dependency>
 ```
 

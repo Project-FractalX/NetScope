@@ -4,6 +4,8 @@ import com.netscope.model.NetworkMethodDefinition;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.aop.support.AopUtils;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.lang.reflect.Method;
 import java.util.List;
@@ -35,7 +37,8 @@ public class NetScopeDynamicController {
                     String requiredKey = def.getApiKey().isEmpty() ? securityConfig.getApiKey() : def.getApiKey();
 
                     if (keyHeader == null || !keyHeader.equals(requiredKey)) {
-                        throw new RuntimeException("Unauthorized: missing or invalid API key for " + def.getMethodName());
+                        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,
+                                "Unauthorized: missing or invalid API key for " + def.getMethodName());
                     }
                 }
 
