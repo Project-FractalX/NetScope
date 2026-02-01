@@ -211,7 +211,7 @@ NetScope makes **any method a network API**, with **optional per-method or globa
 ---
 
 ## Contributing
-Contributions are welcome! Please fork the repository and submit a pull request with your changes.
+Sorry, external contributions are NOT welcomed yet!
 
 ---
 
