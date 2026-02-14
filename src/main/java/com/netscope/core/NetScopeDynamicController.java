@@ -1,54 +1,72 @@
 package com.netscope.core;
 
 import com.netscope.model.NetworkMethodDefinition;
+import com.netscope.security.ServiceAuthValidator;
 import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.aop.support.AopUtils;
 import org.springframework.http.HttpStatus;
-import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
-import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Optional;
 
+/**
+ * Dynamic REST controller that handles all network-exposed method calls.
+ */
 @RestController
 @RequestMapping("/netscope")
 public class NetScopeDynamicController {
 
     private final NetScopeScanner scanner;
-    private final NetScopeSecurityConfig securityConfig;
+    private final NetScopeInvoker invoker;
+    private final ServiceAuthValidator authValidator;
+    private final List<NetworkMethodDefinition> exposedMethods;
 
-    public NetScopeDynamicController(NetScopeScanner scanner, NetScopeSecurityConfig securityConfig) {
+    public NetScopeDynamicController(NetScopeScanner scanner, 
+                                     NetScopeSecurityConfig securityConfig) {
         this.scanner = scanner;
-        this.securityConfig = securityConfig;
+        this.invoker = new NetScopeInvoker();
+        this.authValidator = new ServiceAuthValidator(securityConfig);
+        this.exposedMethods = scanner.scan();
     }
 
-    @RequestMapping("/**")
-    public Object handle(HttpServletRequest request) throws Exception {
-        String fullPath = request.getRequestURI(); // e.g. /netscope/CustomerServiceImpl/getCustomers
-        List<NetworkMethodDefinition> methods = scanner.scan();
+    /**
+     * Handle all dynamic method invocations.
+     */
+    @RequestMapping(value = "/**", method = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE})
+    public ResponseEntity<?> handleRequest(
+            HttpServletRequest request,
+            @RequestBody(required = false) String body,
+            @RequestHeader(value = "X-API-KEY", required = false) String apiKey) {
 
-        for (NetworkMethodDefinition def : methods) {
-            if (fullPath.equals(def.getPath())) {
-                Object bean = def.getBean();
-                Method method = def.getMethod();
+        try {
+            String path = request.getRequestURI();
+            
+            // Find matching method
+            Optional<NetworkMethodDefinition> methodOpt = exposedMethods.stream()
+                .filter(m -> m.getPath().equals(path) && m.isRestEnabled())
+                .findFirst();
 
-                if (def.isRestricted() && securityConfig.isEnabled()) {
-                    String keyHeader = request.getHeader("X-API-KEY");
-                    String requiredKey = def.getApiKey().isEmpty() ? securityConfig.getApiKey() : def.getApiKey();
-
-                    if (keyHeader == null || !keyHeader.equals(requiredKey)) {
-                        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,
-                                "Unauthorized: missing or invalid API key for " + def.getMethodName());
-                    }
-                }
-
-                // simple: only support GET with query params for now
-                Object[] args = {}; // TODO: parse request params and inject
-
-                return method.invoke(bean, args);
+            if (methodOpt.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body("Method not found: " + path);
             }
-        }
 
-        throw new RuntimeException("No such network API: " + fullPath);
+            NetworkMethodDefinition method = methodOpt.get();
+
+            // Validate authentication
+            if (!authValidator.validate(method, apiKey)) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body("Authentication failed. " + authValidator.getExpectedKeyHint(method));
+            }
+
+            // Invoke method
+            Object result = invoker.invoke(method, body);
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body("Error: " + e.getMessage());
+        }
     }
 }
