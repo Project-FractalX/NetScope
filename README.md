@@ -20,7 +20,7 @@ NetScope is perfect for **microservice communication**, **RPC**, **distributed s
 * **Dual Protocol Support**: Every method works with both REST HTTP and gRPC
 * **Two Annotations**:
   * `@NetworkPublic` → Fully open network endpoint
-  * `@NetworkRestricted(key="...")` → Protected endpoint requiring authentication
+  * `@NetworkSecured(key="...")` → Protected endpoint requiring authentication
 * **Dynamic Discovery**: Automatically finds and exposes annotated methods
 * **Interactive Documentation**:
   * `/netscope/docs` → JSON API documentation
@@ -119,7 +119,7 @@ netscope:
 package com.example.service;
 
 import com.netscope.annotation.NetworkPublic;
-import com.netscope.annotation.NetworkRestricted;
+import com.netscope.annotation.NetworkSecured;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -132,14 +132,14 @@ public class CustomerService {
     }
 
     // Requires global API key
-    @NetworkRestricted
+    @NetworkSecured
     public int getLoyaltyPoints(String customerId) {
         // Business logic
         return 1250;
     }
 
     // Requires method-specific API key
-    @NetworkRestricted(key = "inventory-service-key")
+    @NetworkSecured(key = "inventory-service-key")
     public int checkStock(String itemId) {
         // Business logic
         return 42;
@@ -152,7 +152,7 @@ public class CustomerService {
     }
 
     // gRPC-only endpoint
-    @NetworkRestricted(key = "grpc-key", enableRest = false)
+    @NetworkSecured(key = "grpc-key", enableRest = false)
     public String getGrpcOnlyData() {
         return "gRPC only";
     }
@@ -337,7 +337,7 @@ Different keys for different services:
 ```java
 @Service
 public class PaymentService {
-    @NetworkRestricted(key = "payment-service-key")
+    @NetworkSecured(key = "payment-service-key")
     public Receipt processPayment(Payment payment) {
         // ...
     }
@@ -345,7 +345,7 @@ public class PaymentService {
 
 @Service
 public class UserService {
-    @NetworkRestricted(key = "user-service-key")
+    @NetworkSecured(key = "user-service-key")
     public User getUser(String id) {
         // ...
     }
@@ -364,7 +364,7 @@ public class ProductService {
         // Anyone can call
     }
 
-    @NetworkRestricted
+    @NetworkSecured
     public List<Product> getAdminProducts() {
         // Requires authentication
     }
@@ -436,7 +436,7 @@ Replace REST with gRPC for efficient inter-service communication:
 ```java
 @Service
 public class OrderService {
-    @NetworkRestricted(key = "internal-service-key", enableRest = false)
+    @NetworkSecured(key = "internal-service-key", enableRest = false)
     public Order createOrder(OrderRequest request) {
         // Internal service communication via gRPC only
     }
@@ -455,7 +455,7 @@ public class UserService {
         // Public REST API
     }
 
-    @NetworkRestricted(key = "internal", enableRest = false)  // gRPC only
+    @NetworkSecured(key = "internal", enableRest = false)  // gRPC only
     public UserDetails getInternalDetails(String userId) {
         // Internal service communication
     }
@@ -560,9 +560,9 @@ Ensure your service is a Spring bean (`@Service`, `@Component`, etc.) and the me
 )
 ```
 
-#### @NetworkRestricted
+#### @NetworkSecured
 ```java
-@NetworkRestricted(
+@NetworkSecured(
     key = "",                   // Per-method API key (optional, uses global if empty)
     method = RequestMethod.GET, // HTTP method (default: GET)
     path = "",                  // Custom REST path (optional)

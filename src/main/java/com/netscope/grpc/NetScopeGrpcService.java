@@ -14,7 +14,7 @@ import java.util.Optional;
 
 /**
  * gRPC service implementation for NetScope.
- * Exposes all @NetworkPublic and @NetworkRestricted methods via gRPC.
+ * Exposes all @NetworkPublic and @NetworkSecured methods via gRPC.
  */
 public class NetScopeGrpcService extends NetScopeServiceGrpc.NetScopeServiceImplBase {
 

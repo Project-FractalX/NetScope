@@ -39,8 +39,8 @@ public class NetworkMethodDefinition {
         this.returnType = method.getReturnType().getName();
 
         // Extract HTTP method and API key from annotations
-        if (method.isAnnotationPresent(com.netscope.annotation.NetworkRestricted.class)) {
-            var annotation = method.getAnnotation(com.netscope.annotation.NetworkRestricted.class);
+        if (method.isAnnotationPresent(com.netscope.annotation.NetworkSecured.class)) {
+            var annotation = method.getAnnotation(com.netscope.annotation.NetworkSecured.class);
             this.httpMethod = annotation.method().name();
             this.apiKey = annotation.key();
         } else if (method.isAnnotationPresent(com.netscope.annotation.NetworkPublic.class)) {

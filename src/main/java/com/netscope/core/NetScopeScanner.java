@@ -10,7 +10,7 @@ import java.lang.reflect.Method;
 import java.util.*;
 
 /**
- * Scans Spring beans for methods annotated with @NetworkPublic or @NetworkRestricted.
+ * Scans Spring beans for methods annotated with @NetworkPublic or @NetworkSecured.
  */
 public class NetScopeScanner {
 
@@ -51,9 +51,9 @@ public class NetScopeScanner {
                         ));
                     }
 
-                    // Check for @NetworkRestricted
-                    if (method.isAnnotationPresent(NetworkRestricted.class)) {
-                        NetworkRestricted annotation = method.getAnnotation(NetworkRestricted.class);
+                    // Check for @NetworkSecured
+                    if (method.isAnnotationPresent(NetworkSecured.class)) {
+                        NetworkSecured annotation = method.getAnnotation(NetworkSecured.class);
                         String path = annotation.path().isEmpty() 
                             ? mappingStrategy.buildPath(targetClass, method)
                             : annotation.path();
