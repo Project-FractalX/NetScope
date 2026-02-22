@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationContext;
 
+import org.springframework.aop.support.AopUtils;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
@@ -21,8 +23,10 @@ public class NetScopeScanner {
     private final ApplicationContext context;
     private final NetScopeConfig config;
 
-    // Cache: "BeanName.memberName" → definition
+    // Canonical cache: "ConcreteClassName.memberName" → definition  (used by GetDocs)
     private final Map<String, NetworkMethodDefinition> cache = new ConcurrentHashMap<>();
+    // Alias cache: "InterfaceName.memberName" → same definition  (lookup-only, not in GetDocs)
+    private final Map<String, NetworkMethodDefinition> aliasCache = new ConcurrentHashMap<>();
     private volatile boolean scanned = false;
 
     public NetScopeScanner(ApplicationContext context, NetScopeConfig config) {
@@ -39,7 +43,10 @@ public class NetScopeScanner {
 
     public Optional<NetworkMethodDefinition> findMethod(String beanName, String memberName) {
         if (!scanned) doScan();
-        return Optional.ofNullable(cache.get(beanName + "." + memberName));
+        String key = beanName + "." + memberName;
+        NetworkMethodDefinition def = cache.get(key);
+        if (def == null) def = aliasCache.get(key);
+        return Optional.ofNullable(def);
     }
 
     private synchronized void doScan() {
@@ -58,8 +65,8 @@ public class NetScopeScanner {
 
             Class<?> clazz = getTargetClass(bean);
 
-            // ── Scan METHODS ─────────────────────────────────────────────────
-            for (Method method : clazz.getDeclaredMethods()) {
+            // ── Scan METHODS (including inherited) ───────────────────────────
+            for (Method method : getAllMethods(clazz)) {
                 NetworkMethodDefinition def = null;
 
                 NetworkPublic pub = method.getAnnotation(NetworkPublic.class);
@@ -76,13 +83,15 @@ public class NetScopeScanner {
 
                 if (def != null) {
                     String key = def.getBeanName() + "." + def.getMethodName();
-                    cache.put(key, def);
-                    logger.info("  [method] {}.{} → {} | auth={} | static={} | final={}",
-                            def.getBeanName(), def.getMethodName(),
-                            def.isSecured() ? "SECURED" : "PUBLIC",
-                            def.getAuthType(),
-                            def.isStatic(), def.isFinal());
-                    count++;
+                    // putIfAbsent: subclass member (processed first) always wins over superclass
+                    if (cache.putIfAbsent(key, def) == null) {
+                        logger.info("  [method] {}.{} → {} | auth={} | static={} | final={}",
+                                def.getBeanName(), def.getMethodName(),
+                                def.isSecured() ? "SECURED" : "PUBLIC",
+                                def.getAuthType(),
+                                def.isStatic(), def.isFinal());
+                        count++;
+                    }
                 }
             }
 
@@ -106,13 +115,36 @@ public class NetScopeScanner {
 
                 if (def != null) {
                     String key = def.getBeanName() + "." + def.getMethodName();
-                    cache.put(key, def);
-                    logger.info("  [field]  {}.{} → {} | auth={} | static={} | final={} | writeable={}",
-                            def.getBeanName(), def.getMethodName(),
-                            def.isSecured() ? "SECURED" : "PUBLIC",
-                            def.getAuthType(),
-                            def.isStatic(), def.isFinal(), def.isWriteable());
-                    count++;
+                    // putIfAbsent: subclass member (processed first) always wins over superclass
+                    if (cache.putIfAbsent(key, def) == null) {
+                        logger.info("  [field]  {}.{} → {} | auth={} | static={} | final={} | writeable={}",
+                                def.getBeanName(), def.getMethodName(),
+                                def.isSecured() ? "SECURED" : "PUBLIC",
+                                def.getAuthType(),
+                                def.isStatic(), def.isFinal(), def.isWriteable());
+                        count++;
+                    }
+                }
+            }
+            // ── Register interface aliases (lookup-only, not in GetDocs) ─────
+            String concreteName = clazz.getSimpleName();
+            for (Class<?> iface : collectInterfaces(clazz)) {
+                if (!isUserInterface(iface)) continue;
+                String ifaceName = iface.getSimpleName();
+                if (ifaceName.equals(concreteName)) continue;
+
+                int aliasCount = 0;
+                for (Map.Entry<String, NetworkMethodDefinition> entry : cache.entrySet()) {
+                    String cacheKey = entry.getKey();
+                    if (cacheKey.startsWith(concreteName + ".")) {
+                        String memberName = cacheKey.substring(concreteName.length() + 1);
+                        if (aliasCache.putIfAbsent(ifaceName + "." + memberName, entry.getValue()) == null) {
+                            aliasCount++;
+                        }
+                    }
+                }
+                if (aliasCount > 0) {
+                    logger.info("  [alias]  {} → {} ({} member(s))", ifaceName, concreteName, aliasCount);
                 }
             }
         }
@@ -122,8 +154,54 @@ public class NetScopeScanner {
     }
 
     /**
+     * Collects all methods from:
+     *   1. The class hierarchy (subclass → superclass), then
+     *   2. All reachable interfaces (depth-first, deduplicated).
+     * Order ensures putIfAbsent lets the most-specific declaration win:
+     *   concrete class > abstract superclass > interface default.
+     */
+    private List<Method> getAllMethods(Class<?> clazz) {
+        List<Method> methods = new ArrayList<>();
+
+        // 1. Class hierarchy
+        Class<?> current = clazz;
+        while (current != null && current != Object.class) {
+            methods.addAll(Arrays.asList(current.getDeclaredMethods()));
+            current = current.getSuperclass();
+        }
+
+        // 2. Interfaces (all reachable, deduplicated)
+        for (Class<?> iface : collectInterfaces(clazz)) {
+            methods.addAll(Arrays.asList(iface.getDeclaredMethods()));
+        }
+
+        return methods;
+    }
+
+    /**
+     * Returns all interfaces reachable from clazz (via implements and extends),
+     * deduplicated and in depth-first order.
+     */
+    private Set<Class<?>> collectInterfaces(Class<?> clazz) {
+        Set<Class<?>> visited = new LinkedHashSet<>();
+        collectInterfaces(clazz, visited);
+        return visited;
+    }
+
+    private void collectInterfaces(Class<?> clazz, Set<Class<?>> visited) {
+        if (clazz == null || clazz == Object.class) return;
+        for (Class<?> iface : clazz.getInterfaces()) {
+            if (visited.add(iface)) {
+                collectInterfaces(iface, visited);  // interface can extend interfaces
+            }
+        }
+        collectInterfaces(clazz.getSuperclass(), visited);
+    }
+
+    /**
      * Collects all fields declared on clazz and its superclasses,
-     * stopping at Object. Superclass fields come after the subclass fields.
+     * stopping at Object. Subclass fields come first so that putIfAbsent
+     * lets the subclass shadow take precedence over the superclass declaration.
      */
     private List<Field> getAllFields(Class<?> clazz) {
         List<Field> fields = new ArrayList<>();
@@ -135,17 +213,22 @@ public class NetScopeScanner {
         return fields;
     }
 
-    /** Unwrap Spring proxies to get the real class */
+    /**
+     * Returns true for user-defined interfaces — excludes java.*, javax.*,
+     * jakarta.*, org.springframework.*, and other JVM/framework internals.
+     */
+    private boolean isUserInterface(Class<?> iface) {
+        String pkg = iface.getPackageName();
+        return !pkg.startsWith("java.")
+            && !pkg.startsWith("javax.")
+            && !pkg.startsWith("jakarta.")
+            && !pkg.startsWith("org.springframework.")
+            && !pkg.startsWith("com.sun.")
+            && !pkg.startsWith("sun.");
+    }
+
+    /** Unwrap Spring proxies (both CGLIB and JDK dynamic) to get the real class */
     private Class<?> getTargetClass(Object bean) {
-        try {
-            Class<?> clazz = bean.getClass();
-            // Handle CGLIB proxies
-            if (clazz.getName().contains("$$")) {
-                return clazz.getSuperclass();
-            }
-            return clazz;
-        } catch (Exception e) {
-            return bean.getClass();
-        }
+        return AopUtils.getTargetClass(bean);
     }
 }

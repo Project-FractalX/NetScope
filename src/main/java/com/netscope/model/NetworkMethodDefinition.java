@@ -2,6 +2,7 @@ package com.netscope.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.netscope.annotation.AuthType;
+import org.springframework.aop.support.AopUtils;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -39,7 +40,7 @@ public class NetworkMethodDefinition {
         this.method      = method;
         this.field       = null;
         this.sourceType  = SourceType.METHOD;
-        this.beanName    = bean.getClass().getSimpleName();
+        this.beanName    = AopUtils.getTargetClass(bean).getSimpleName();
         this.methodName  = method.getName();
         this.secured     = secured;
         this.authType    = authType;
@@ -65,7 +66,7 @@ public class NetworkMethodDefinition {
         this.method      = null;
         this.field       = field;
         this.sourceType  = SourceType.FIELD;
-        this.beanName    = bean.getClass().getSimpleName();
+        this.beanName    = AopUtils.getTargetClass(bean).getSimpleName();
         this.methodName  = field.getName();
         this.secured     = secured;
         this.authType    = authType;

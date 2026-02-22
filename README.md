@@ -131,6 +131,42 @@ private static final String SECRET = "tok_abc";        // readable, not writable
 | Final field | Readable via `InvokeMethod` only — writes are rejected |
 | Static field/method | Supported; no bean instance required |
 | Inherited field | Scanned automatically up the full superclass chain |
+| Inherited method | Scanned automatically up the full superclass chain; subclass override takes precedence |
+| Interface method | Annotation on the interface is picked up automatically — the implementing class does not need to repeat it |
+
+### Interface name aliases
+
+When a bean implements a user-defined interface, NetScope automatically registers an alias so you can use **either** the concrete class name or the interface name as `bean_name`:
+
+```java
+public interface CustomerService {
+    @NetworkPublic
+    CustomerResDTO getCustomers();
+}
+
+@Service
+public class CustomerServiceImpl implements CustomerService {
+    // no need to repeat @NetworkPublic on the override
+    public CustomerResDTO getCustomers() { ... }
+}
+```
+
+```bash
+# Both of these work:
+"bean_name": "CustomerServiceImpl"   # concrete class name
+"bean_name": "CustomerService"       # interface name alias
+```
+
+Startup log confirms the alias was registered:
+```
+[method] CustomerServiceImpl.getCustomers → PUBLIC
+[alias]  CustomerService → CustomerServiceImpl (1 member(s))
+```
+
+**Notes:**
+- Aliases are lookup-only — `GetDocs` returns members under the concrete class name only, without duplicates
+- Standard Java and Spring interfaces (`Serializable`, `ApplicationContextAware`, etc.) are never aliased
+- If two beans implement the same interface, the first one scanned claims the alias
 
 ---
 
@@ -412,6 +448,7 @@ logging:
 - Bean name and member name are case-sensitive
 - The field or method must have `@NetworkPublic` or `@NetworkSecured`
 - The bean must be a Spring-managed component (`@Service`, `@Component`, etc.)
+- You can use either the concrete class name (`CustomerServiceImpl`) or any user-defined interface name (`CustomerService`) as `bean_name`
 
 ### `UNAUTHENTICATED`
 - Check that the `authorization` or `x-api-key` header is present in the request metadata
