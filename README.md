@@ -9,7 +9,10 @@
 - Expose bean methods and fields over gRPC with a single annotation
 - Dual authentication: OAuth 2.0 JWT and/or API key per member
 - Read and write field attributes remotely via dedicated RPCs
-- Inherited field scanning across the full class hierarchy
+- Overloaded method support — overload inferred automatically from argument types; `parameter_types` only needed when inference is still ambiguous
+- Reactive return types — `Mono`, `Flux`, and `CompletableFuture` unwrapped automatically
+- Inherited field and method scanning across the full class hierarchy
+- Interface method scanning with automatic interface name aliases
 - Static and final field awareness
 - Bidirectional streaming support
 - Live introspection via `GetDocs` RPC
@@ -127,6 +130,8 @@ private static final String SECRET = "tok_abc";        // readable, not writable
 | Annotation target | Behaviour |
 |---|---|
 | Method | Callable via `InvokeMethod` RPC |
+| Overloaded method | All overloads registered; overload inferred automatically from argument types; `parameter_types` only needed when inference is still ambiguous (e.g. `int` vs `long`) |
+| Reactive method (`Mono`/`Flux`/`CompletableFuture`) | Return value unwrapped automatically before serialization |
 | Non-final field | Readable via `InvokeMethod`, writable via `SetAttribute` |
 | Final field | Readable via `InvokeMethod` only — writes are rejected |
 | Static field/method | Supported; no bean instance required |
@@ -266,6 +271,26 @@ grpcurl -plaintext \
     "value": {"bool_value": true}
   }' localhost:9090 netscope.NetScopeService/SetAttribute
 
+# Invoke an overloaded method — type inferred automatically from argument kind
+# (string_value → String, number_value → numeric, bool_value → boolean, struct_value → POJO/Map, list_value → List/array)
+grpcurl -plaintext \
+  -H 'authorization: Bearer eyJhbGci...' \
+  -d '{
+    "bean_name": "OrderService",
+    "member_name": "process",
+    "arguments": [{"string_value": "ORD001"}]
+  }' localhost:9090 netscope.NetScopeService/InvokeMethod
+
+# Supply parameter_types only when inference is ambiguous (e.g. int vs long, both number_value)
+grpcurl -plaintext \
+  -H 'authorization: Bearer eyJhbGci...' \
+  -d '{
+    "bean_name": "OrderService",
+    "member_name": "process",
+    "parameter_types": ["int"],
+    "arguments": [{"number_value": 42}]
+  }' localhost:9090 netscope.NetScopeService/InvokeMethod
+
 # Introspect all exposed members
 grpcurl -plaintext -d '{}' localhost:9090 netscope.NetScopeService/GetDocs
 ```
@@ -377,6 +402,65 @@ for (int i = 0; i < 10; i++) {
 requestStream.onCompleted();
 ```
 
+### Object arguments (POJOs)
+
+Pass a Java object by encoding it as a `struct_value`. Jackson deserializes the struct fields into the target class automatically — field names must match the Java class fields (or `@JsonProperty` aliases).
+
+**grpcurl**
+
+```bash
+grpcurl -plaintext \
+  -H 'authorization: Bearer eyJhbGci...' \
+  -d '{
+    "bean_name": "OrderService",
+    "member_name": "createOrder",
+    "arguments": [{
+      "struct_value": {
+        "fields": {
+          "customerId": {"string_value": "CUST001"},
+          "amount":     {"number_value": 99.99},
+          "express":    {"bool_value": true}
+        }
+      }
+    }]
+  }' localhost:9090 netscope.NetScopeService/InvokeMethod
+```
+
+**Java client**
+
+```java
+import com.google.protobuf.Struct;
+
+Struct orderStruct = Struct.newBuilder()
+    .putFields("customerId", Value.newBuilder().setStringValue("CUST001").build())
+    .putFields("amount",     Value.newBuilder().setNumberValue(99.99).build())
+    .putFields("express",    Value.newBuilder().setBoolValue(true).build())
+    .build();
+
+InvokeRequest request = InvokeRequest.newBuilder()
+    .setBeanName("OrderService")
+    .setMemberName("createOrder")
+    .setArguments(ListValue.newBuilder()
+        .addValues(Value.newBuilder().setStructValue(orderStruct)))
+    .build();
+```
+
+**Python client**
+
+```python
+order = struct_pb2.Struct()
+order.update({"customerId": "CUST001", "amount": 99.99, "express": True})
+
+request = InvokeRequest(bean_name="OrderService", member_name="createOrder")
+request.arguments.values.append(struct_pb2.Value(struct_value=order))
+```
+
+**Notes**
+- **Nested objects** — use a nested `struct_value` inside the parent struct's fields
+- **List of objects** — use `list_value` whose items are each a `struct_value`
+- **Null argument** — send `{"null_value": 0}`
+- Overload inference recognises `struct_value` as compatible with POJO and `Map` parameters, so `parameter_types` is rarely needed for object arguments
+
 ---
 
 ## gRPC status codes
@@ -388,7 +472,7 @@ requestStream.onCompleted();
 | `UNAUTHENTICATED` | Missing or invalid credentials |
 | `PERMISSION_DENIED` | Wrong credential type for the member |
 | `FAILED_PRECONDITION` | Attempt to write a `final` field |
-| `INVALID_ARGUMENT` | Wrong number of arguments, or calling `SetAttribute` on a method |
+| `INVALID_ARGUMENT` | Wrong number of arguments, calling `SetAttribute` on a method, or ambiguous overloaded method call missing `parameter_types` |
 | `INTERNAL` | Unexpected server error |
 
 ---
@@ -459,6 +543,13 @@ logging:
 
 ### `INVALID_ARGUMENT` on `SetAttribute`
 - You called `SetAttribute` with a method name — use `InvokeMethod` for methods
+
+### `INVALID_ARGUMENT: Ambiguous method`
+- The method name matches multiple overloads and the argument types could not disambiguate them automatically
+- NetScope first tries to infer the correct overload from the protobuf `Value` kinds of the supplied arguments (`string_value` → String, `number_value` → numeric, `bool_value` → boolean, etc.)
+- Inference fails only when two or more overloads are equally compatible (e.g. `process(int)` vs `process(long)` — both accept `number_value`)
+- Fix: add `parameter_types` to the request using the exact type names shown in `GetDocs` (`ParameterInfo.type`)
+- Example error: `Ambiguous method 'process' on OrderService — specify parameter_types to disambiguate. Available: [process(int index), process(long index)]`
 
 ---
 

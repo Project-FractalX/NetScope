@@ -1,20 +1,19 @@
 package com.netscope.core;
 
-import com.netscope.annotation.AuthType;
 import com.netscope.annotation.NetworkPublic;
 import com.netscope.annotation.NetworkSecured;
 import com.netscope.config.NetScopeConfig;
 import com.netscope.model.NetworkMethodDefinition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.ApplicationContext;
-
 import org.springframework.aop.support.AopUtils;
+import org.springframework.context.ApplicationContext;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 public class NetScopeScanner {
 
@@ -23,10 +22,18 @@ public class NetScopeScanner {
     private final ApplicationContext context;
     private final NetScopeConfig config;
 
-    // Canonical cache: "ConcreteClassName.memberName" → definition  (used by GetDocs)
+    // Canonical cache — methods: "BeanName.method(T1,T2)", fields: "BeanName.field"
     private final Map<String, NetworkMethodDefinition> cache = new ConcurrentHashMap<>();
-    // Alias cache: "InterfaceName.memberName" → same definition  (lookup-only, not in GetDocs)
+
+    // Alias cache — same key format, keyed by interface name instead of concrete class name
     private final Map<String, NetworkMethodDefinition> aliasCache = new ConcurrentHashMap<>();
+
+    // Method index — "BeanName.method" → all overloads (for lookup without parameter_types)
+    private final Map<String, List<NetworkMethodDefinition>> methodIndex = new ConcurrentHashMap<>();
+
+    // Alias method index — same as methodIndex but keyed by interface name
+    private final Map<String, List<NetworkMethodDefinition>> aliasMethodIndex = new ConcurrentHashMap<>();
+
     private volatile boolean scanned = false;
 
     public NetScopeScanner(ApplicationContext context, NetScopeConfig config) {
@@ -35,19 +42,54 @@ public class NetScopeScanner {
     }
 
     public List<NetworkMethodDefinition> scan() {
-        if (!scanned) {
-            doScan();
-        }
+        if (!scanned) doScan();
         return new ArrayList<>(cache.values());
     }
 
-    public Optional<NetworkMethodDefinition> findMethod(String beanName, String memberName) {
+    /**
+     * Looks up a member by bean name, member name, and optional parameter types.
+     *
+     * - Fields: always found by "BeanName.fieldName" with no parameter types
+     * - Methods with parameter_types: exact key "BeanName.method(T1,T2)"
+     * - Methods without parameter_types: unambiguous index lookup;
+     *   throws AmbiguousInvocationException if multiple overloads exist
+     *
+     * Both the concrete class name and any user-defined interface name are accepted
+     * as beanName.
+     */
+    public Optional<NetworkMethodDefinition> findMethod(String beanName, String memberName,
+                                                        List<String> parameterTypes) {
         if (!scanned) doScan();
-        String key = beanName + "." + memberName;
-        NetworkMethodDefinition def = cache.get(key);
-        if (def == null) def = aliasCache.get(key);
-        return Optional.ofNullable(def);
+
+        String baseKey = beanName + "." + memberName;
+
+        // 1. Direct lookup — hits fields (no parens) and aliased fields
+        NetworkMethodDefinition def = cache.get(baseKey);
+        if (def == null) def = aliasCache.get(baseKey);
+        if (def != null) return Optional.of(def);
+
+        // 2. Exact method lookup when caller supplies parameter types
+        if (parameterTypes != null && !parameterTypes.isEmpty()) {
+            String exactKey = baseKey + "(" + String.join(",", parameterTypes) + ")";
+            def = cache.get(exactKey);
+            if (def == null) def = aliasCache.get(exactKey);
+            return Optional.ofNullable(def);
+        }
+
+        // 3. Unambiguous index lookup — no parameter types provided
+        List<NetworkMethodDefinition> candidates = methodIndex.getOrDefault(baseKey, List.of());
+        if (candidates.isEmpty()) {
+            candidates = aliasMethodIndex.getOrDefault(baseKey, List.of());
+        }
+        if (candidates.size() == 1) return Optional.of(candidates.get(0));
+        if (candidates.size() > 1) {
+            throw new AmbiguousInvocationException(beanName, memberName, candidates);
+        }
+
+        return Optional.empty();
     }
+
+    // ── Scanning ──────────────────────────────────────────────────────────────
 
     private synchronized void doScan() {
         if (scanned) return;
@@ -65,7 +107,7 @@ public class NetScopeScanner {
 
             Class<?> clazz = getTargetClass(bean);
 
-            // ── Scan METHODS (including inherited) ───────────────────────────
+            // ── Scan METHODS (including inherited + interface) ────────────────
             for (Method method : getAllMethods(clazz)) {
                 NetworkMethodDefinition def = null;
 
@@ -82,14 +124,16 @@ public class NetScopeScanner {
                 }
 
                 if (def != null) {
-                    String key = def.getBeanName() + "." + def.getMethodName();
-                    // putIfAbsent: subclass member (processed first) always wins over superclass
+                    // Methods use parameterized key to support overloading
+                    String key = methodKey(def.getBeanName(), def.getMethodName(), method);
                     if (cache.putIfAbsent(key, def) == null) {
-                        logger.info("  [method] {}.{} → {} | auth={} | static={} | final={}",
-                                def.getBeanName(), def.getMethodName(),
+                        // Also add to method index for overload-unaware lookups
+                        String baseKey = def.getBeanName() + "." + def.getMethodName();
+                        methodIndex.computeIfAbsent(baseKey, k -> new ArrayList<>()).add(def);
+                        logger.info("  [method] {}.{}({}) → {} | auth={} | static={} | final={}",
+                                def.getBeanName(), def.getMethodName(), paramSignature(method),
                                 def.isSecured() ? "SECURED" : "PUBLIC",
-                                def.getAuthType(),
-                                def.isStatic(), def.isFinal());
+                                def.getAuthType(), def.isStatic(), def.isFinal());
                         count++;
                     }
                 }
@@ -114,8 +158,8 @@ public class NetScopeScanner {
                 }
 
                 if (def != null) {
+                    // Fields use plain key — they cannot be overloaded
                     String key = def.getBeanName() + "." + def.getMethodName();
-                    // putIfAbsent: subclass member (processed first) always wins over superclass
                     if (cache.putIfAbsent(key, def) == null) {
                         logger.info("  [field]  {}.{} → {} | auth={} | static={} | final={} | writeable={}",
                                 def.getBeanName(), def.getMethodName(),
@@ -126,6 +170,7 @@ public class NetScopeScanner {
                     }
                 }
             }
+
             // ── Register interface aliases (lookup-only, not in GetDocs) ─────
             String concreteName = clazz.getSimpleName();
             for (Class<?> iface : collectInterfaces(clazz)) {
@@ -136,10 +181,20 @@ public class NetScopeScanner {
                 int aliasCount = 0;
                 for (Map.Entry<String, NetworkMethodDefinition> entry : cache.entrySet()) {
                     String cacheKey = entry.getKey();
-                    if (cacheKey.startsWith(concreteName + ".")) {
-                        String memberName = cacheKey.substring(concreteName.length() + 1);
-                        if (aliasCache.putIfAbsent(ifaceName + "." + memberName, entry.getValue()) == null) {
-                            aliasCount++;
+                    if (!cacheKey.startsWith(concreteName + ".")) continue;
+
+                    String memberSuffix = cacheKey.substring(concreteName.length() + 1);
+                    String aliasKey = ifaceName + "." + memberSuffix;
+                    NetworkMethodDefinition def = entry.getValue();
+
+                    if (aliasCache.putIfAbsent(aliasKey, def) == null) {
+                        aliasCount++;
+                        if (!def.isField()) {
+                            // Also index the alias by base name for overload-unaware lookups
+                            String aliasBaseKey = ifaceName + "." + def.getMethodName();
+                            aliasMethodIndex
+                                    .computeIfAbsent(aliasBaseKey, k -> new ArrayList<>())
+                                    .add(def);
                         }
                     }
                 }
@@ -153,55 +208,45 @@ public class NetScopeScanner {
         logger.info("NetScope: scan complete — {} member(s) registered", count);
     }
 
+    // ── Key helpers ───────────────────────────────────────────────────────────
+
     /**
-     * Collects all methods from:
-     *   1. The class hierarchy (subclass → superclass), then
-     *   2. All reachable interfaces (depth-first, deduplicated).
-     * Order ensures putIfAbsent lets the most-specific declaration win:
-     *   concrete class > abstract superclass > interface default.
+     * Full cache key for a method, including parameter type signature.
+     * Example: "CustomerServiceImpl.process(String,int)"
+     */
+    private String methodKey(String beanName, String methodName, Method method) {
+        return beanName + "." + methodName + "(" + paramSignature(method) + ")";
+    }
+
+    /** Comma-separated simple type names of method parameters. */
+    private String paramSignature(Method method) {
+        return Arrays.stream(method.getParameterTypes())
+                .map(Class::getSimpleName)
+                .collect(Collectors.joining(","));
+    }
+
+    // ── Class hierarchy helpers ───────────────────────────────────────────────
+
+    /**
+     * Collects all methods from the class hierarchy then all reachable interfaces.
+     * Subclass methods come first so putIfAbsent lets the most-specific declaration win.
      */
     private List<Method> getAllMethods(Class<?> clazz) {
         List<Method> methods = new ArrayList<>();
-
-        // 1. Class hierarchy
         Class<?> current = clazz;
         while (current != null && current != Object.class) {
             methods.addAll(Arrays.asList(current.getDeclaredMethods()));
             current = current.getSuperclass();
         }
-
-        // 2. Interfaces (all reachable, deduplicated)
         for (Class<?> iface : collectInterfaces(clazz)) {
             methods.addAll(Arrays.asList(iface.getDeclaredMethods()));
         }
-
         return methods;
     }
 
     /**
-     * Returns all interfaces reachable from clazz (via implements and extends),
-     * deduplicated and in depth-first order.
-     */
-    private Set<Class<?>> collectInterfaces(Class<?> clazz) {
-        Set<Class<?>> visited = new LinkedHashSet<>();
-        collectInterfaces(clazz, visited);
-        return visited;
-    }
-
-    private void collectInterfaces(Class<?> clazz, Set<Class<?>> visited) {
-        if (clazz == null || clazz == Object.class) return;
-        for (Class<?> iface : clazz.getInterfaces()) {
-            if (visited.add(iface)) {
-                collectInterfaces(iface, visited);  // interface can extend interfaces
-            }
-        }
-        collectInterfaces(clazz.getSuperclass(), visited);
-    }
-
-    /**
-     * Collects all fields declared on clazz and its superclasses,
-     * stopping at Object. Subclass fields come first so that putIfAbsent
-     * lets the subclass shadow take precedence over the superclass declaration.
+     * Collects all fields from the class hierarchy.
+     * Subclass fields come first so putIfAbsent lets the subclass shadow win.
      */
     private List<Field> getAllFields(Class<?> clazz) {
         List<Field> fields = new ArrayList<>();
@@ -213,9 +258,26 @@ public class NetScopeScanner {
         return fields;
     }
 
+    /** All interfaces reachable from clazz, depth-first, deduplicated. */
+    private Set<Class<?>> collectInterfaces(Class<?> clazz) {
+        Set<Class<?>> visited = new LinkedHashSet<>();
+        collectInterfaces(clazz, visited);
+        return visited;
+    }
+
+    private void collectInterfaces(Class<?> clazz, Set<Class<?>> visited) {
+        if (clazz == null || clazz == Object.class) return;
+        for (Class<?> iface : clazz.getInterfaces()) {
+            if (visited.add(iface)) {
+                collectInterfaces(iface, visited);
+            }
+        }
+        collectInterfaces(clazz.getSuperclass(), visited);
+    }
+
     /**
-     * Returns true for user-defined interfaces — excludes java.*, javax.*,
-     * jakarta.*, org.springframework.*, and other JVM/framework internals.
+     * Excludes java.*, javax.*, jakarta.*, org.springframework.*, and other
+     * JVM/framework internals so they are never registered as aliases.
      */
     private boolean isUserInterface(Class<?> iface) {
         String pkg = iface.getPackageName();
@@ -227,7 +289,7 @@ public class NetScopeScanner {
             && !pkg.startsWith("sun.");
     }
 
-    /** Unwrap Spring proxies (both CGLIB and JDK dynamic) to get the real class */
+    /** Unwrap Spring proxies (both CGLIB and JDK dynamic) to get the real class. */
     private Class<?> getTargetClass(Object bean) {
         return AopUtils.getTargetClass(bean);
     }

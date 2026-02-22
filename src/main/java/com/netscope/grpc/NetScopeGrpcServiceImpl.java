@@ -2,10 +2,12 @@ package com.netscope.grpc;
 
 import com.google.protobuf.Value;
 import com.google.protobuf.util.JsonFormat;
+import com.netscope.core.AmbiguousInvocationException;
 import com.netscope.core.NetScopeInvoker;
 import com.netscope.core.NetScopeScanner;
 import com.netscope.grpc.proto.*;
 import com.netscope.model.NetworkMethodDefinition;
+import com.netscope.model.NetworkMethodDefinition.ParameterInfo;
 import com.netscope.security.OAuth2AuthorizationService;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
@@ -14,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeServiceImplBase {
 
@@ -32,13 +35,10 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
         logger.info("NetScope gRPC service initialized");
     }
 
-    /**
-     * Converts a protobuf ListValue into a JSON array string for the invoker.
-     */
+    // ── Proto ↔ JSON helpers ──────────────────────────────────────────────────
+
     private String toArgumentsJson(com.google.protobuf.ListValue listValue) {
-        if (listValue == null || listValue.getValuesCount() == 0) {
-            return "[]";
-        }
+        if (listValue == null || listValue.getValuesCount() == 0) return "[]";
         try {
             Value arrayValue = Value.newBuilder().setListValue(listValue).build();
             return JsonFormat.printer().omittingInsignificantWhitespace().print(arrayValue);
@@ -48,9 +48,6 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
         }
     }
 
-    /**
-     * Converts a protobuf Value into a JSON string for the invoker.
-     */
     private String toValueJson(Value value) {
         if (value == null) return "null";
         try {
@@ -61,25 +58,21 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
         }
     }
 
-    /**
-     * Converts a JSON string into a google.protobuf.Value.
-     * Handles objects {}, arrays [], strings, numbers, booleans, and null.
-     */
     private Value toProtoValue(String json) {
         if (json == null || json.equals("null")) {
-            return Value.newBuilder().setNullValue(
-                    com.google.protobuf.NullValue.NULL_VALUE).build();
+            return Value.newBuilder().setNullValue(com.google.protobuf.NullValue.NULL_VALUE).build();
         }
         try {
-            Value.Builder valueBuilder = Value.newBuilder();
-            JsonFormat.parser().merge(json, valueBuilder);
-            return valueBuilder.build();
+            Value.Builder b = Value.newBuilder();
+            JsonFormat.parser().merge(json, b);
+            return b.build();
         } catch (Exception e) {
-            // Fallback: return as plain string value
             logger.warn("Could not parse result as JSON, returning as string: {}", e.getMessage());
             return Value.newBuilder().setStringValue(json).build();
         }
     }
+
+    // ── RPC handlers ──────────────────────────────────────────────────────────
 
     @Override
     public void invokeMethod(InvokeRequest request, StreamObserver<InvokeResponse> responseObserver) {
@@ -87,18 +80,8 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
             String accessToken = NetScopeAuthInterceptor.ACCESS_TOKEN_CTX.get();
             String apiKey      = NetScopeAuthInterceptor.API_KEY_CTX.get();
 
-            Optional<NetworkMethodDefinition> methodOpt =
-                    scanner.findMethod(request.getBeanName(), request.getMemberName());
-
-            if (methodOpt.isEmpty()) {
-                responseObserver.onError(Status.NOT_FOUND
-                        .withDescription("Member not found: "
-                                + request.getBeanName() + "." + request.getMemberName())
-                        .asRuntimeException());
-                return;
-            }
-
-            NetworkMethodDefinition method = methodOpt.get();
+            NetworkMethodDefinition method = resolve(request, responseObserver);
+            if (method == null) return;
 
             try {
                 authService.authorize(method, accessToken, apiKey);
@@ -108,12 +91,8 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
             }
 
             String resultJson = invoker.invoke(method, toArgumentsJson(request.getArguments()));
-
-            InvokeResponse response = InvokeResponse.newBuilder()
-                    .setResult(toProtoValue(resultJson))
-                    .build();
-
-            responseObserver.onNext(response);
+            responseObserver.onNext(InvokeResponse.newBuilder()
+                    .setResult(toProtoValue(resultJson)).build());
             responseObserver.onCompleted();
 
         } catch (io.grpc.StatusRuntimeException e) {
@@ -121,8 +100,7 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
         } catch (Exception e) {
             logger.error("Error invoking {}.{}", request.getBeanName(), request.getMemberName(), e);
             responseObserver.onError(Status.INTERNAL
-                    .withDescription("Invocation error: " + e.getMessage())
-                    .asRuntimeException());
+                    .withDescription("Invocation error: " + e.getMessage()).asRuntimeException());
         }
     }
 
@@ -134,7 +112,7 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
             String apiKey      = NetScopeAuthInterceptor.API_KEY_CTX.get();
 
             Optional<NetworkMethodDefinition> defOpt =
-                    scanner.findMethod(request.getBeanName(), request.getAttributeName());
+                    scanner.findMethod(request.getBeanName(), request.getAttributeName(), List.of());
 
             if (defOpt.isEmpty()) {
                 responseObserver.onError(Status.NOT_FOUND
@@ -169,14 +147,9 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
                 return;
             }
 
-            String valueJson    = toValueJson(request.getValue());
-            String previousJson = invoker.write(def, valueJson);
-
-            SetAttributeResponse response = SetAttributeResponse.newBuilder()
-                    .setPreviousValue(toProtoValue(previousJson))
-                    .build();
-
-            responseObserver.onNext(response);
+            String previousJson = invoker.write(def, toValueJson(request.getValue()));
+            responseObserver.onNext(SetAttributeResponse.newBuilder()
+                    .setPreviousValue(toProtoValue(previousJson)).build());
             responseObserver.onCompleted();
 
         } catch (io.grpc.StatusRuntimeException e) {
@@ -185,20 +158,16 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
             logger.error("Error writing attribute {}.{}",
                     request.getBeanName(), request.getAttributeName(), e);
             responseObserver.onError(Status.INTERNAL
-                    .withDescription("Write error: " + e.getMessage())
-                    .asRuntimeException());
+                    .withDescription("Write error: " + e.getMessage()).asRuntimeException());
         }
     }
 
     @Override
     public void getDocs(DocsRequest request, StreamObserver<DocsResponse> responseObserver) {
         try {
-            List<NetworkMethodDefinition> members = scanner.scan();
             DocsResponse.Builder response = DocsResponse.newBuilder();
-
-            for (NetworkMethodDefinition member : members) {
+            for (NetworkMethodDefinition member : scanner.scan()) {
                 MemberKind kind = member.isField() ? MemberKind.FIELD : MemberKind.METHOD;
-
                 MethodInfo.Builder info = MethodInfo.newBuilder()
                         .setBeanName(member.getBeanName())
                         .setMemberName(member.getMethodName())
@@ -210,22 +179,18 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
                         .setWriteable(member.isWriteable())
                         .setIsStatic(member.isStatic())
                         .setIsFinal(member.isFinal());
-
-                for (NetworkMethodDefinition.ParameterInfo p : member.getParameters()) {
-                    info.addParameters(ParameterInfo.newBuilder()
+                for (ParameterInfo p : member.getParameters()) {
+                    info.addParameters(com.netscope.grpc.proto.ParameterInfo.newBuilder()
                             .setName(p.getName()).setType(p.getType()).setIndex(p.getIndex())
                             .build());
                 }
                 response.addMethods(info.build());
             }
-
             responseObserver.onNext(response.build());
             responseObserver.onCompleted();
-
         } catch (Exception e) {
             responseObserver.onError(Status.INTERNAL
-                    .withDescription("Failed to get docs: " + e.getMessage())
-                    .asRuntimeException());
+                    .withDescription("Failed to get docs: " + e.getMessage()).asRuntimeException());
         }
     }
 
@@ -240,21 +205,12 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
             @Override
             public void onNext(InvokeRequest request) {
                 try {
-                    Optional<NetworkMethodDefinition> methodOpt =
-                            scanner.findMethod(request.getBeanName(), request.getMemberName());
-                    if (methodOpt.isEmpty()) {
-                        responseObserver.onError(Status.NOT_FOUND
-                                .withDescription("Member not found: "
-                                        + request.getBeanName() + "." + request.getMemberName())
-                                .asRuntimeException());
-                        return;
-                    }
-                    NetworkMethodDefinition method = methodOpt.get();
+                    NetworkMethodDefinition method = resolve(request, responseObserver);
+                    if (method == null) return;
                     authService.authorize(method, accessToken, apiKey);
                     String resultJson = invoker.invoke(method, toArgumentsJson(request.getArguments()));
                     responseObserver.onNext(InvokeResponse.newBuilder()
-                            .setResult(toProtoValue(resultJson))
-                            .build());
+                            .setResult(toProtoValue(resultJson)).build());
                 } catch (io.grpc.StatusRuntimeException e) {
                     responseObserver.onError(e);
                 } catch (Exception e) {
@@ -266,6 +222,128 @@ public class NetScopeGrpcServiceImpl extends NetScopeServiceGrpc.NetScopeService
 
             @Override public void onError(Throwable t) { logger.error("Stream error", t); }
             @Override public void onCompleted() { responseObserver.onCompleted(); }
+        };
+    }
+
+    // ── Overload resolution ───────────────────────────────────────────────────
+
+    /**
+     * Resolves the correct NetworkMethodDefinition for a request, using two strategies:
+     *
+     *   1. Exact lookup — uses parameter_types from the request if provided.
+     *   2. Type inference — when the call is ambiguous, narrows candidates by matching
+     *      each argument's protobuf Value kind against the Java parameter type.
+     *      Falls back to INVALID_ARGUMENT only when inference still leaves multiple matches.
+     *
+     * Returns null and writes the error to responseObserver on failure.
+     */
+    private NetworkMethodDefinition resolve(InvokeRequest request,
+                                            StreamObserver<InvokeResponse> responseObserver) {
+        Optional<NetworkMethodDefinition> methodOpt;
+        try {
+            methodOpt = scanner.findMethod(request.getBeanName(), request.getMemberName(),
+                    request.getParameterTypesList());
+        } catch (AmbiguousInvocationException e) {
+            // Exact lookup was ambiguous — try to narrow by argument value types
+            methodOpt = inferOverload(e.getCandidates(), request.getArguments().getValuesList());
+            if (methodOpt.isEmpty()) {
+                responseObserver.onError(Status.INVALID_ARGUMENT
+                        .withDescription(e.getMessage()).asRuntimeException());
+                return null;
+            }
+        }
+
+        if (methodOpt.isEmpty()) {
+            responseObserver.onError(Status.NOT_FOUND
+                    .withDescription("Member not found: "
+                            + request.getBeanName() + "." + request.getMemberName())
+                    .asRuntimeException());
+            return null;
+        }
+        return methodOpt.get();
+    }
+
+    /**
+     * Narrows overload candidates by checking whether each candidate's parameter types
+     * are compatible with the protobuf Value kinds of the supplied arguments.
+     *
+     * Compatible mappings:
+     *   string_value  → String, CharSequence
+     *   number_value  → int, long, double, float, short, byte (and boxed), Number, BigDecimal, BigInteger
+     *   bool_value    → boolean, Boolean
+     *   struct_value  → any non-primitive, non-String, non-collection type (POJOs, Maps)
+     *   list_value    → List, Collection, Set, arrays
+     *   null_value    → any reference type (not primitives)
+     *   Object        → compatible with any value kind
+     *
+     * Returns the single matching candidate, or empty if zero or multiple still match.
+     */
+    private Optional<NetworkMethodDefinition> inferOverload(
+            List<NetworkMethodDefinition> candidates, List<Value> argValues) {
+
+        List<NetworkMethodDefinition> matching = candidates.stream()
+                .filter(def -> isCompatible(def.getParameters(), argValues))
+                .collect(Collectors.toList());
+
+        return matching.size() == 1 ? Optional.of(matching.get(0)) : Optional.empty();
+    }
+
+    private boolean isCompatible(ParameterInfo[] params, List<Value> argValues) {
+        if (params.length != argValues.size()) return false;
+        for (int i = 0; i < params.length; i++) {
+            if (!kindCompatible(params[i].getType(), argValues.get(i).getKindCase())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean kindCompatible(String javaType, Value.KindCase kind) {
+        if (javaType.equals("Object")) return true;  // Object accepts anything
+        return switch (kind) {
+            case STRING_VALUE -> isStringType(javaType);
+            case NUMBER_VALUE -> isNumericType(javaType);
+            case BOOL_VALUE   -> isBoolType(javaType);
+            case STRUCT_VALUE -> isStructType(javaType);
+            case LIST_VALUE   -> isListType(javaType);
+            case NULL_VALUE   -> !isPrimitive(javaType);
+            default           -> false;
+        };
+    }
+
+    private boolean isStringType(String t) {
+        return t.equals("String") || t.equals("CharSequence");
+    }
+
+    private boolean isNumericType(String t) {
+        return switch (t) {
+            case "int", "Integer", "long", "Long", "double", "Double",
+                 "float", "Float", "short", "Short", "byte", "Byte",
+                 "Number", "BigDecimal", "BigInteger" -> true;
+            default -> false;
+        };
+    }
+
+    private boolean isBoolType(String t) {
+        return t.equals("boolean") || t.equals("Boolean");
+    }
+
+    private boolean isListType(String t) {
+        return switch (t) {
+            case "List", "ArrayList", "LinkedList",
+                 "Collection", "Set", "HashSet", "LinkedHashSet" -> true;
+            default -> t.endsWith("[]");
+        };
+    }
+
+    private boolean isStructType(String t) {
+        return !isStringType(t) && !isNumericType(t) && !isBoolType(t) && !isListType(t);
+    }
+
+    private boolean isPrimitive(String t) {
+        return switch (t) {
+            case "int", "long", "double", "float", "boolean", "short", "byte", "char" -> true;
+            default -> false;
         };
     }
 }
