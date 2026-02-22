@@ -1,4 +1,4 @@
-# NetScope gRPC
+# NetScope Server (gPRC)
 
 **NetScope** is a Spring Boot library that automatically exposes annotated bean **methods and fields** as gRPC endpoints with built-in OAuth 2.0 and API key authentication.
 
